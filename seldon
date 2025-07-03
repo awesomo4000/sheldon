@@ -1,0 +1,1133 @@
+#!/usr/bin/env python3
+"""
+Seldon: Self-improving AI coding assistant
+A single-file tool that learns from coding failures and successes
+"""
+
+import os
+import sys
+import json
+import hashlib
+import subprocess
+import argparse
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+
+# Core configuration embedded in the tool
+DEFAULT_CONFIG = {
+    'version': '0.1.0',
+    'settings': {
+        'auto_reflect': True,
+        'reflection_threshold': 1,
+        'overzealousness_prevention': True,
+        'require_compilation_check': True
+    }
+}
+
+class Seldon:
+    def __init__(self):
+        self.workspace = Path.cwd()
+        self.seldon_dir = self.workspace / '.seldon'
+        
+    def init(self):
+        """Initialize Seldon with minimal structure"""
+        # Create only essential directories
+        (self.seldon_dir / 'learnings').mkdir(parents=True, exist_ok=True)
+        (self.seldon_dir / 'prompts').mkdir(parents=True, exist_ok=True)
+        (self.seldon_dir / 'executions').mkdir(parents=True, exist_ok=True)
+        (self.seldon_dir / 'user_language').mkdir(parents=True, exist_ok=True)
+        
+        # Create base prompt
+        base_prompt = """# Seldon Base Prompt
+
+## Core Rules
+1. Do EXACTLY what was asked - nothing more, nothing less
+2. NEVER add unrequested features
+3. ALWAYS maintain compilable state
+4. Learn from every failure
+
+## Current Learnings
+<!-- Learnings will be appended here -->
+"""
+        
+        with open(self.seldon_dir / 'prompts' / 'current.md', 'w') as f:
+            f.write(base_prompt)
+            
+        # Create learnings file
+        learnings = {
+            'failures': [],
+            'successes': [],
+            'patterns': []
+        }
+        
+        with open(self.seldon_dir / 'learnings' / 'history.json', 'w') as f:
+            json.dump(learnings, f, indent=2)
+            
+        # Create executions tracking file
+        executions = {
+            'executions': [],
+            'prompt_versions': {}
+        }
+        
+        with open(self.seldon_dir / 'executions' / 'tracking.json', 'w') as f:
+            json.dump(executions, f, indent=2)
+        
+        # Create user language dictionary
+        user_language = {
+            'terms': {},
+            'mutations': []
+        }
+        
+        with open(self.seldon_dir / 'user_language' / 'dictionary.json', 'w') as f:
+            json.dump(user_language, f, indent=2)
+            
+        print(f"✓ Initialized Seldon in {self.seldon_dir}")
+        
+    def reflect(self, failure: bool, context: str, error: Optional[str] = None, execution_id: Optional[str] = None):
+        """Reflect on an attempt and learn from it"""
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        
+        if not learnings_file.exists():
+            print("Error: Seldon not initialized. Run 'seldon init' first.")
+            return
+            
+        # Load current learnings
+        with open(learnings_file, 'r') as f:
+            learnings = json.load(f)
+            
+        # Create reflection entry
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'context': context,
+            'error': error,
+            'type': 'failure' if failure else 'success',
+            'execution_id': execution_id
+        }
+        
+        # If we have an execution_id, update the execution record
+        if execution_id:
+            self._update_execution_outcome(execution_id, failure, error)
+        
+        if failure:
+            learnings['failures'].append(entry)
+            # Extract pattern from failure
+            pattern = self._extract_pattern(context, error)
+            if pattern and pattern not in learnings['patterns']:
+                learnings['patterns'].append(pattern)
+                print(f"✓ Learned new pattern: {pattern}")
+        else:
+            learnings['successes'].append(entry)
+            print("✓ Reinforced successful approach")
+            
+        # Save updated learnings
+        with open(learnings_file, 'w') as f:
+            json.dump(learnings, f, indent=2)
+            
+        # Update prompt with new learnings
+        self._update_prompt(learnings)
+    
+    def _update_execution_outcome(self, execution_id: str, failure: bool, error: Optional[str]):
+        """Update execution record with outcome"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        
+        if tracking_file.exists():
+            with open(tracking_file, 'r') as f:
+                tracking = json.load(f)
+            
+            # Find and update the execution record
+            for execution in tracking['executions']:
+                if execution['id'] == execution_id:
+                    execution['outcome'] = {
+                        'success': not failure,
+                        'error': error,
+                        'completed': datetime.now().isoformat()
+                    }
+                    break
+            
+            with open(tracking_file, 'w') as f:
+                json.dump(tracking, f, indent=2)
+        
+    def _extract_pattern(self, context: str, error: str) -> Optional[str]:
+        """Extract a learning pattern from failure"""
+        # Simple pattern extraction - can be made more sophisticated
+        if error and "await" in error and "async" in context:
+            return "Always use await with async operations in try blocks"
+        elif error and ("undefined" in error or "null" in error):
+            return "Check for null/undefined before accessing properties"
+        elif error and "import" in error:
+            return "Verify imports exist before using them"
+        # Add more pattern recognition as needed
+        return None
+        
+    def _update_prompt(self, learnings):
+        """Update the current prompt with learnings"""
+        prompt_file = self.seldon_dir / 'prompts' / 'current.md'
+        
+        # Read base prompt
+        with open(prompt_file, 'r') as f:
+            lines = f.readlines()
+            
+        # Find where to insert learnings
+        learnings_index = None
+        for i, line in enumerate(lines):
+            if "## Current Learnings" in line:
+                learnings_index = i + 1
+                break
+                
+        if learnings_index:
+            # Clear old learnings
+            lines = lines[:learnings_index + 1]
+            
+            # Add patterns
+            if learnings['patterns']:
+                lines.append("\n### Learned Patterns\n")
+                for i, pattern in enumerate(learnings['patterns'][-10:], 1):  # Last 10
+                    lines.append(f"{i}. {pattern}\n")
+                    
+            # Add recent failures to remember
+            recent_failures = learnings['failures'][-5:]  # Last 5
+            if recent_failures:
+                lines.append("\n### Recent Failures to Avoid\n")
+                for failure in recent_failures:
+                    lines.append(f"- {failure['context']}: {failure.get('error', 'Failed')}\n")
+                    
+        # Write updated prompt
+        with open(prompt_file, 'w') as f:
+            f.writelines(lines)
+            
+        # Archive this prompt version
+        self._archive_prompt_version()
+    
+    def _get_prompt_hash(self) -> str:
+        """Get hash of current prompt for versioning"""
+        prompt_file = self.seldon_dir / 'prompts' / 'current.md'
+        with open(prompt_file, 'r') as f:
+            content = f.read()
+        return hashlib.sha256(content.encode()).hexdigest()[:12]
+    
+    def _archive_prompt_version(self):
+        """Archive current prompt version with its hash"""
+        prompt_hash = self._get_prompt_hash()
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        
+        if tracking_file.exists():
+            with open(tracking_file, 'r') as f:
+                tracking = json.load(f)
+            
+            # Only archive if this is a new version
+            if prompt_hash not in tracking['prompt_versions']:
+                prompt_file = self.seldon_dir / 'prompts' / 'current.md'
+                with open(prompt_file, 'r') as f:
+                    prompt_content = f.read()
+                
+                tracking['prompt_versions'][prompt_hash] = {
+                    'content': prompt_content,
+                    'created': datetime.now().isoformat(),
+                    'patterns_count': len(self._get_current_patterns())
+                }
+                
+                with open(tracking_file, 'w') as f:
+                    json.dump(tracking, f, indent=2)
+    
+    def _get_current_patterns(self) -> List[str]:
+        """Get current patterns from learnings"""
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        if learnings_file.exists():
+            with open(learnings_file, 'r') as f:
+                learnings = json.load(f)
+            return learnings.get('patterns', [])
+        return []
+    
+    def execute(self, task: str) -> str:
+        """Execute a task and track which prompt was used"""
+        # Get current prompt hash before execution
+        prompt_hash = self._get_prompt_hash()
+        # Add microseconds to ensure unique IDs
+        execution_id = f"exec_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        
+        # Record execution start
+        execution_record = {
+            'id': execution_id,
+            'task': task,
+            'prompt_hash': prompt_hash,
+            'timestamp': datetime.now().isoformat(),
+            'outcome': None  # Will be updated by reflect
+        }
+        
+        # Save execution record
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        tracking['executions'].append(execution_record)
+        
+        with open(tracking_file, 'w') as f:
+            json.dump(tracking, f, indent=2)
+        
+        print(f"✓ Execution {execution_id} started with prompt {prompt_hash}")
+        return execution_id
+            
+    def prompt(self):
+        """Display the current evolved prompt"""
+        prompt_file = self.seldon_dir / 'prompts' / 'current.md'
+        
+        if not prompt_file.exists():
+            print("Error: Seldon not initialized. Run 'seldon init' first.")
+            return
+            
+        with open(prompt_file, 'r') as f:
+            print(f.read())
+            
+    def stats(self):
+        """Show learning statistics"""
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        
+        if not learnings_file.exists():
+            print("Error: Seldon not initialized. Run 'seldon init' first.")
+            return
+            
+        with open(learnings_file, 'r') as f:
+            learnings = json.load(f)
+            
+        total_attempts = len(learnings['failures']) + len(learnings['successes'])
+        success_rate = len(learnings['successes']) / max(1, total_attempts)
+        
+        print(f"""
+Seldon Learning Statistics
+─────────────────────────
+Total Attempts:    {total_attempts}
+Failures:          {len(learnings['failures'])}
+Successes:         {len(learnings['successes'])}
+Patterns Learned:  {len(learnings['patterns'])}
+Success Rate:      {success_rate:.1%}
+""")
+    
+    def history(self):
+        """Show execution history with prompt effectiveness"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        
+        if not tracking_file.exists():
+            print("Error: No execution history found.")
+            return
+            
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        print("\nExecution History")
+        print("═" * 80)
+        
+        # Group executions by prompt version
+        prompt_stats = {}
+        for execution in tracking['executions']:
+            prompt_hash = execution['prompt_hash']
+            if prompt_hash not in prompt_stats:
+                prompt_stats[prompt_hash] = {
+                    'total': 0,
+                    'successes': 0,
+                    'failures': 0,
+                    'executions': []
+                }
+            
+            prompt_stats[prompt_hash]['total'] += 1
+            prompt_stats[prompt_hash]['executions'].append(execution)
+            
+            if execution['outcome']:
+                if execution['outcome']['success']:
+                    prompt_stats[prompt_hash]['successes'] += 1
+                else:
+                    prompt_stats[prompt_hash]['failures'] += 1
+        
+        # Display stats for each prompt version
+        for prompt_hash, stats in prompt_stats.items():
+            success_rate = stats['successes'] / stats['total'] if stats['total'] > 0 else 0
+            prompt_info = tracking['prompt_versions'].get(prompt_hash, {})
+            
+            print(f"\nPrompt Version: {prompt_hash}")
+            print(f"Created: {prompt_info.get('created', 'Unknown')}")
+            print(f"Patterns: {prompt_info.get('patterns_count', 0)}")
+            print(f"Executions: {stats['total']} (✓ {stats['successes']} | ✗ {stats['failures']})")
+            print(f"Success Rate: {success_rate:.1%}")
+            
+            # Show recent executions for this prompt
+            recent = sorted(stats['executions'], key=lambda x: x['timestamp'], reverse=True)[:3]
+            if recent:
+                print("\nRecent executions:")
+                for exec in recent:
+                    outcome = "✓" if exec['outcome'] and exec['outcome']['success'] else "✗"
+                    print(f"  {outcome} {exec['id']}: {exec['task'][:50]}...")
+    
+    def test(self, scenario: str = 'all'):
+        """Run self-improvement tests"""
+        print("🧪 Running Seldon self-improvement tests\n")
+        
+        test_scenarios = {
+            'async-error': self._test_async_error_learning,
+            'null-error': self._test_null_error_learning,
+            'overzealous': self._test_overzealousness_prevention
+        }
+        
+        if scenario == 'all':
+            scenarios = test_scenarios.keys()
+        else:
+            scenarios = [scenario]
+        
+        results = {}
+        for test_name in scenarios:
+            print(f"\n{'='*60}")
+            print(f"Testing: {test_name}")
+            print('='*60)
+            results[test_name] = test_scenarios[test_name]()
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print("Test Summary")
+        print('='*60)
+        for test_name, (passed, message) in results.items():
+            status = "✓ PASS" if passed else "✗ FAIL"
+            print(f"{status} {test_name}: {message}")
+    
+    def _test_async_error_learning(self) -> tuple[bool, str]:
+        """Test if Seldon learns from async/await errors"""
+        print("\n1. Simulating initial async error...")
+        
+        # Execute task that will fail
+        exec_id1 = self.execute("Add error handling to async function")
+        
+        # Check current prompt doesn't have async pattern
+        prompt_before = self._get_prompt_content()
+        has_async_pattern_before = "await" in prompt_before.lower()
+        
+        # Simulate failure
+        self.reflect(
+            failure=True,
+            context="Added try-catch to async function",
+            error="TypeError: Cannot read property 'data' of undefined - await missing",
+            execution_id=exec_id1
+        )
+        
+        # Check if pattern was learned
+        patterns = self._get_current_patterns()
+        learned_async = any("await" in p for p in patterns)
+        
+        print(f"2. Pattern learned: {learned_async}")
+        print(f"   Current patterns: {patterns}")
+        
+        # Try same task again
+        print("\n3. Trying similar task with evolved prompt...")
+        exec_id2 = self.execute("Add error handling to another async function")
+        
+        # Check evolved prompt
+        prompt_after = self._get_prompt_content()
+        has_async_pattern_after = "await" in prompt_after.lower()
+        
+        # Simulate success this time
+        self.reflect(
+            failure=False,
+            context="Added try-catch with proper await",
+            execution_id=exec_id2
+        )
+        
+        # Verify improvement
+        tracking = self._get_tracking_data()
+        first_prompt_hash = None
+        second_prompt_hash = None
+        
+        for exec in tracking['executions']:
+            if exec['id'] == exec_id1:
+                first_prompt_hash = exec['prompt_hash']
+            elif exec['id'] == exec_id2:
+                second_prompt_hash = exec['prompt_hash']
+        
+        improved = (first_prompt_hash != second_prompt_hash and 
+                   has_async_pattern_after and 
+                   learned_async)
+        
+        message = f"Learned from async error: {learned_async}, Prompt evolved: {first_prompt_hash != second_prompt_hash}"
+        return improved, message
+    
+    def _test_null_error_learning(self) -> tuple[bool, str]:
+        """Test if Seldon learns from null/undefined errors"""
+        print("\n1. Simulating null reference error...")
+        
+        exec_id = self.execute("Process user data from API")
+        
+        self.reflect(
+            failure=True,
+            context="Accessing nested properties",
+            error="Cannot read property 'name' of null",
+            execution_id=exec_id
+        )
+        
+        patterns = self._get_current_patterns()
+        learned_null = any("null" in p.lower() or "undefined" in p.lower() for p in patterns)
+        
+        message = f"Learned null checking pattern: {learned_null}"
+        return learned_null, message
+    
+    def _test_overzealousness_prevention(self) -> tuple[bool, str]:
+        """Test if Seldon learns not to do unrequested work"""
+        print("\n1. Testing overzealousness detection...")
+        
+        # Check if base prompt has overzealousness rule
+        prompt = self._get_prompt_content()
+        has_rule = "NEVER add unrequested features" in prompt
+        
+        message = f"Has overzealousness prevention rule: {has_rule}"
+        return has_rule, message
+    
+    def _get_prompt_content(self) -> str:
+        """Get current prompt content"""
+        prompt_file = self.seldon_dir / 'prompts' / 'current.md'
+        if prompt_file.exists():
+            with open(prompt_file, 'r') as f:
+                return f.read()
+        return ""
+    
+    def _get_tracking_data(self) -> dict:
+        """Get execution tracking data"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        if tracking_file.exists():
+            with open(tracking_file, 'r') as f:
+                return json.load(f)
+        return {'executions': [], 'prompt_versions': {}}
+    
+    def _attribute_outcome(self, execution_id: str, patterns_applied: List[str]) -> Dict[str, float]:
+        """Attribute success/failure to specific patterns"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        if not tracking_file.exists():
+            return {}
+        
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        # Find execution
+        execution = None
+        for exec in tracking['executions']:
+            if exec['id'] == execution_id:
+                execution = exec
+                break
+        
+        if not execution or not execution.get('outcome'):
+            return {}
+        
+        # Simple attribution: if success, all patterns get credit
+        # if failure, patterns present get negative credit
+        attribution = {}
+        success = execution['outcome']['success']
+        
+        for pattern in patterns_applied:
+            attribution[pattern] = 1.0 if success else -1.0
+        
+        # Store attribution
+        execution['attribution'] = attribution
+        
+        with open(tracking_file, 'w') as f:
+            json.dump(tracking, f, indent=2)
+        
+        return attribution
+    
+    def get_pattern_effectiveness(self) -> Dict[str, Dict[str, float]]:
+        """Get effectiveness scores for each learned pattern"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        if not tracking_file.exists():
+            return {}
+        
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        # Calculate effectiveness for each pattern
+        pattern_stats = {}
+        
+        for execution in tracking['executions']:
+            if execution.get('attribution'):
+                for pattern, score in execution['attribution'].items():
+                    if pattern not in pattern_stats:
+                        pattern_stats[pattern] = {'successes': 0, 'failures': 0, 'total': 0}
+                    
+                    pattern_stats[pattern]['total'] += 1
+                    if score > 0:
+                        pattern_stats[pattern]['successes'] += 1
+                    else:
+                        pattern_stats[pattern]['failures'] += 1
+        
+        # Calculate effectiveness scores
+        effectiveness = {}
+        for pattern, stats in pattern_stats.items():
+            effectiveness[pattern] = {
+                'success_rate': stats['successes'] / stats['total'] if stats['total'] > 0 else 0,
+                'applications': stats['total'],
+                'successes': stats['successes'],
+                'failures': stats['failures']
+            }
+        
+        return effectiveness
+    
+    def code_with_reversion(self, task: str, test_cmd: str, no_revert: bool = False) -> tuple[bool, str]:
+        """Execute code change with automatic reversion on test failure"""
+        print(f"\n🔧 Executing code task: {task}")
+        
+        # Start execution tracking
+        exec_id = self.execute(task)
+        
+        # Detect VCS (jj or git)
+        vcs_type = self._detect_vcs()
+        
+        
+        if vcs_type == 'jj':
+            # Create jj change
+            change_id = f"seldon_{exec_id}"
+            print(f"📝 Creating jj change: {change_id}")
+            
+            result = subprocess.run(
+                ['jj', 'new', '-m', f'[Seldon] {task}'],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                print(f"❌ Failed to create jj change: {result.stderr}")
+                self.reflect(failure=True, context=task, error=f"jj new failed: {result.stderr}", execution_id=exec_id)
+                return False, "Failed to create jj change"
+        elif vcs_type == 'git':
+            # Create git commit checkpoint
+            print(f"📝 Creating git checkpoint for: {task}")
+            
+            # Check if we have uncommitted changes
+            status = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
+            if status.stdout.strip():
+                print("⚠️  Warning: Uncommitted changes present")
+                # Store current state
+                subprocess.run(['git', 'add', '-A'], capture_output=True)
+                subprocess.run(['git', 'stash', 'push', '-m', f'Seldon checkpoint before: {task}'], capture_output=True)
+        else:
+            print("⚠️  No version control detected. Proceeding without reversion capability.")
+            no_revert = True
+        
+        # Note: At this point, the AI would make code changes
+        # For now, we'll simulate this with a placeholder
+        print(f"💭 AI would now implement: {task}")
+        print("   (In real usage, AI generates code here)")
+        
+        # Run tests
+        print(f"\n🧪 Running tests: {test_cmd}")
+        test_result = subprocess.run(
+            test_cmd,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        success = test_result.returncode == 0
+        
+        if not success:
+            print(f"❌ Tests failed!")
+            print(f"   Error: {test_result.stderr[:200]}")
+            
+            if not no_revert:
+                # Revert the change based on VCS type
+                print("⏮️  Reverting changes...")
+                
+                if vcs_type == 'jj':
+                    revert_result = subprocess.run(
+                        ['jj', 'abandon'],
+                        capture_output=True,
+                        text=True
+                    )
+                elif vcs_type == 'git':
+                    # Reset to previous state
+                    subprocess.run(['git', 'reset', '--hard'], capture_output=True)
+                    # Pop the stash if we had one
+                    stash_list = subprocess.run(['git', 'stash', 'list'], capture_output=True, text=True)
+                    if 'Seldon checkpoint' in stash_list.stdout:
+                        subprocess.run(['git', 'stash', 'pop'], capture_output=True)
+                    revert_result = subprocess.CompletedProcess(args=[], returncode=0)
+                else:
+                    revert_result = subprocess.CompletedProcess(args=[], returncode=1, stderr="No VCS available")
+                
+                if revert_result.returncode == 0:
+                    print("✓ Changes reverted successfully")
+                else:
+                    print(f"❌ Failed to revert: {revert_result.stderr}")
+            
+            # Learn from failure
+            failure_context = f"Attempted {task} but tests failed"
+            self.reflect(
+                failure=True,
+                context=failure_context,
+                error=test_result.stderr[:500],
+                execution_id=exec_id
+            )
+            
+            # Extract specific learning
+            if "await" in test_result.stderr:
+                self._add_pattern_if_new("Remember to await async operations when implementing {task}")
+            if "null" in test_result.stderr or "undefined" in test_result.stderr:
+                self._add_pattern_if_new("Add null checks when implementing {task}")
+                
+            return False, f"Tests failed: {test_result.stderr[:200]}"
+        else:
+            print("✅ Tests passed!")
+            
+            # Record success
+            self.reflect(
+                failure=False,
+                context=f"Successfully implemented {task}",
+                execution_id=exec_id
+            )
+            
+            return True, "Tests passed"
+    
+    def _add_pattern_if_new(self, pattern: str):
+        """Add a new pattern if it doesn't already exist"""
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        
+        with open(learnings_file, 'r') as f:
+            learnings = json.load(f)
+        
+        if pattern not in learnings['patterns']:
+            learnings['patterns'].append(pattern)
+            print(f"📚 Learned new pattern: {pattern}")
+            
+            with open(learnings_file, 'w') as f:
+                json.dump(learnings, f, indent=2)
+            
+            # Update prompt
+            self._update_prompt(learnings)
+    
+    def _detect_vcs(self) -> str:
+        """Detect which version control system is available"""
+        # Check for jj first
+        jj_check = subprocess.run(['jj', 'status'], capture_output=True, text=True)
+        if jj_check.returncode == 0:
+            return 'jj'
+        
+        # Check for git
+        git_check = subprocess.run(['git', 'status'], capture_output=True, text=True)
+        if git_check.returncode == 0:
+            return 'git'
+        
+        return 'none'
+    
+    def analyze_patterns(self, apply: bool = False) -> Dict[str, Any]:
+        """Analyze execution history and generalize patterns"""
+        print("\n🔍 Analyzing execution patterns...\n")
+        
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        
+        if not tracking_file.exists():
+            print("No execution history to analyze.")
+            return {}
+        
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        with open(learnings_file, 'r') as f:
+            learnings = json.load(f)
+        
+        analysis = {
+            'pattern_generalizations': [],
+            'common_failure_types': {},
+            'success_patterns': [],
+            'overzealousness_detection': []
+        }
+        
+        # Analyze failure patterns
+        failure_keywords = {}
+        for failure in learnings['failures']:
+            if failure.get('error'):
+                # Extract key error patterns
+                if 'await' in failure['error'] or 'async' in failure['error']:
+                    failure_keywords['async_errors'] = failure_keywords.get('async_errors', 0) + 1
+                if 'null' in failure['error'] or 'undefined' in failure['error']:
+                    failure_keywords['null_errors'] = failure_keywords.get('null_errors', 0) + 1
+                if 'not defined' in failure['error'] or 'NameError' in failure['error']:
+                    failure_keywords['undefined_errors'] = failure_keywords.get('undefined_errors', 0) + 1
+        
+        # Generate generalizations
+        if failure_keywords.get('async_errors', 0) >= 2:
+            analysis['pattern_generalizations'].append({
+                'pattern': 'Async/await completeness',
+                'rule': 'When working with async functions, ALWAYS check: 1) Function is marked async, 2) ALL promises have await, 3) Try-catch wraps all awaits',
+                'confidence': 0.9,
+                'based_on': f"{failure_keywords['async_errors']} async-related failures"
+            })
+        
+        if failure_keywords.get('null_errors', 0) >= 2:
+            analysis['pattern_generalizations'].append({
+                'pattern': 'Defensive null checking',
+                'rule': 'Before accessing any property: 1) Check if object exists, 2) Use optional chaining (?.), 3) Provide fallback values',
+                'confidence': 0.85,
+                'based_on': f"{failure_keywords['null_errors']} null-related failures"
+            })
+        
+        # Analyze overzealousness
+        for failure in learnings['failures']:
+            if 'without asking' in failure.get('error', '') or 'unrequested' in failure.get('context', ''):
+                analysis['overzealousness_detection'].append({
+                    'context': failure['context'],
+                    'lesson': 'Suggest improvements instead of implementing them'
+                })
+        
+        # Analyze success patterns
+        success_contexts = [s['context'] for s in learnings['successes']]
+        if len(success_contexts) > 2:
+            # Find common words in successful contexts
+            common_words = set(success_contexts[0].split())
+            for context in success_contexts[1:]:
+                common_words &= set(context.split())
+            
+            if common_words:
+                analysis['success_patterns'].append({
+                    'pattern': f"Tasks involving {', '.join(common_words)} tend to succeed",
+                    'confidence': len(success_contexts) / (len(learnings['failures']) + len(success_contexts))
+                })
+        
+        # Display analysis
+        print("📊 Pattern Analysis Results:")
+        print("=" * 60)
+        
+        if analysis['pattern_generalizations']:
+            print("\n🧩 Generalized Patterns:")
+            for gen in analysis['pattern_generalizations']:
+                print(f"\n  Pattern: {gen['pattern']}")
+                print(f"  Rule: {gen['rule']}")
+                print(f"  Confidence: {gen['confidence']:.0%}")
+                print(f"  Based on: {gen['based_on']}")
+        
+        if analysis['overzealousness_detection']:
+            print("\n⚠️  Overzealousness Patterns Detected:")
+            for over in analysis['overzealousness_detection']:
+                print(f"  - {over['lesson']}")
+        
+        if analysis['success_patterns']:
+            print("\n✅ Success Patterns:")
+            for success in analysis['success_patterns']:
+                print(f"  - {success['pattern']} (confidence: {success['confidence']:.0%})")
+        
+        # Apply generalizations if requested
+        if apply and analysis['pattern_generalizations']:
+            print("\n📝 Applying generalizations to prompt...")
+            self._apply_generalizations(analysis['pattern_generalizations'])
+            print("✓ Prompt updated with generalized patterns")
+        
+        return analysis
+    
+    def _apply_generalizations(self, generalizations: List[Dict[str, Any]]):
+        """Apply generalized patterns to the prompt"""
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        
+        with open(learnings_file, 'r') as f:
+            learnings = json.load(f)
+        
+        # Add high-confidence generalizations as patterns
+        for gen in generalizations:
+            if gen['confidence'] >= 0.8 and gen['rule'] not in learnings['patterns']:
+                learnings['patterns'].append(gen['rule'])
+                print(f"  + Added: {gen['pattern']}")
+        
+        with open(learnings_file, 'w') as f:
+            json.dump(learnings, f, indent=2)
+        
+        # Update prompt
+        self._update_prompt(learnings)
+    
+    def show_evolution(self):
+        """Show prompt evolution history"""
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        
+        if not tracking_file.exists():
+            print("No evolution history found.")
+            return
+        
+        with open(tracking_file, 'r') as f:
+            tracking = json.load(f)
+        
+        print("\n📈 Prompt Evolution History")
+        print("=" * 80)
+        
+        # Sort versions by creation time
+        versions = []
+        for hash, info in tracking['prompt_versions'].items():
+            versions.append({
+                'hash': hash,
+                'created': info['created'],
+                'patterns': info.get('patterns_count', 0),
+                'content': info['content']
+            })
+        
+        versions.sort(key=lambda x: x['created'])
+        
+        # Show evolution
+        for i, version in enumerate(versions):
+            print(f"\n{'─' * 60}")
+            print(f"Version {i+1}: {version['hash'][:8]}...")
+            print(f"Created: {version['created']}")
+            print(f"Patterns: {version['patterns']}")
+            
+            # Show what changed
+            if i > 0:
+                prev = versions[i-1]
+                print(f"\nChanges from previous:")
+                
+                # Compare pattern counts
+                pattern_diff = version['patterns'] - prev['patterns']
+                if pattern_diff > 0:
+                    print(f"  + Added {pattern_diff} new pattern(s)")
+                
+                # Show content diff preview
+                prev_lines = prev['content'].split('\n')
+                curr_lines = version['content'].split('\n')
+                
+                for j, (p, c) in enumerate(zip(prev_lines, curr_lines)):
+                    if p != c and j < 30:  # Show first difference
+                        print(f"  Line {j}: '{p[:50]}...' → '{c[:50]}...'")
+                        break
+        
+        # Summary
+        print(f"\n{'─' * 60}")
+        print(f"Total versions: {len(versions)}")
+        if versions:
+            print(f"Current version: {versions[-1]['hash'][:8]}")
+            print(f"Total patterns learned: {versions[-1]['patterns']}")
+    
+    def detect_prompt_mutation(self, user_prompt: str) -> Dict[str, Any]:
+        """Detect potential confusing terms or user-specific language"""
+        dictionary_file = self.seldon_dir / 'user_language' / 'dictionary.json'
+        
+        if not dictionary_file.exists():
+            return {'unknown_terms': [], 'suggestions': []}
+        
+        with open(dictionary_file, 'r') as f:
+            user_lang = json.load(f)
+        
+        # Look for known user-specific terms
+        known_terms = []
+        for term, definition in user_lang['terms'].items():
+            if term.lower() in user_prompt.lower():
+                known_terms.append({
+                    'term': term,
+                    'definition': definition,
+                    'confidence': definition.get('confidence', 1.0)
+                })
+        
+        # Detect potential mutations/variations
+        mutations = []
+        words = user_prompt.lower().split()
+        
+        # Check for similar words that might be variations
+        for word in words:
+            for mutation in user_lang['mutations']:
+                if self._is_similar(word, mutation['original']):
+                    mutations.append({
+                        'found': word,
+                        'might_mean': mutation['meaning'],
+                        'confidence': mutation.get('confidence', 0.8)
+                    })
+        
+        return {
+            'known_terms': known_terms,
+            'mutations': mutations,
+            'prompt': user_prompt
+        }
+    
+    def learn_term(self, term: str, definition: str, examples: List[str] = None):
+        """Learn a user-specific term and its meaning"""
+        dictionary_file = self.seldon_dir / 'user_language' / 'dictionary.json'
+        
+        with open(dictionary_file, 'r') as f:
+            user_lang = json.load(f)
+        
+        # Add or update term
+        user_lang['terms'][term.lower()] = {
+            'definition': definition,
+            'examples': examples or [],
+            'learned': datetime.now().isoformat(),
+            'usage_count': user_lang['terms'].get(term.lower(), {}).get('usage_count', 0) + 1
+        }
+        
+        with open(dictionary_file, 'w') as f:
+            json.dump(user_lang, f, indent=2)
+        
+        print(f"✓ Learned term: '{term}' means '{definition}'")
+    
+    def _is_similar(self, word1: str, word2: str) -> bool:
+        """Simple similarity check - can be made more sophisticated"""
+        # Check if one is substring of other
+        if word1 in word2 or word2 in word1:
+            return True
+        
+        # Check edit distance (simplified)
+        if abs(len(word1) - len(word2)) <= 2:
+            # Count character differences
+            diff = sum(c1 != c2 for c1, c2 in zip(word1, word2))
+            return diff <= 2
+        
+        return False
+    
+    def show_context_recovery(self):
+        """Show information to help new AI sessions understand Seldon's state"""
+        print("\n🧠 Seldon Context Recovery Information")
+        print("=" * 60)
+        
+        # Show basic stats
+        learnings_file = self.seldon_dir / 'learnings' / 'history.json'
+        if learnings_file.exists():
+            with open(learnings_file, 'r') as f:
+                learnings = json.load(f)
+            
+            print(f"\n📊 Current State:")
+            print(f"  - Total attempts: {len(learnings['failures']) + len(learnings['successes'])}")
+            print(f"  - Success rate: {len(learnings['successes']) / max(1, len(learnings['failures']) + len(learnings['successes'])):.1%}")
+            print(f"  - Patterns learned: {len(learnings['patterns'])}")
+            
+            if learnings['patterns']:
+                print(f"\n📚 Key Patterns Learned:")
+                for i, pattern in enumerate(learnings['patterns'][-5:], 1):  # Last 5
+                    print(f"  {i}. {pattern}")
+        
+        # Show user terms
+        dict_file = self.seldon_dir / 'user_language' / 'dictionary.json'
+        if dict_file.exists():
+            with open(dict_file, 'r') as f:
+                user_lang = json.load(f)
+            
+            if user_lang['terms']:
+                print(f"\n🗣️  User-Specific Terms:")
+                for term, info in user_lang['terms'].items():
+                    print(f"  - '{term}': {info['definition']}")
+        
+        # Show recent executions
+        tracking_file = self.seldon_dir / 'executions' / 'tracking.json'
+        if tracking_file.exists():
+            with open(tracking_file, 'r') as f:
+                tracking = json.load(f)
+            
+            recent = tracking['executions'][-5:]  # Last 5
+            if recent:
+                print(f"\n🕒 Recent Tasks:")
+                for exec in recent:
+                    status = "✓" if exec.get('outcome', {}).get('success') else "✗"
+                    print(f"  {status} {exec['task'][:60]}...")
+        
+        print(f"\n📖 For full context, read CLAUDE.md")
+        print(f"💡 Run './seldon stats' for detailed statistics")
+        print(f"🔍 Run './seldon evolution' to see how prompts evolved")
+        print(f"🧪 Run './seldon analyze' to see pattern analysis\n")
+
+def main():
+    parser = argparse.ArgumentParser(description='Seldon: Self-improving AI coding assistant')
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # Init command
+    subparsers.add_parser('init', help='Initialize Seldon in current directory')
+    
+    # Execute command
+    execute_parser = subparsers.add_parser('execute', help='Start tracking an execution')
+    execute_parser.add_argument('--task', required=True, help='Task description')
+    
+    # Reflect command
+    reflect_parser = subparsers.add_parser('reflect', help='Reflect on a coding attempt')
+    reflect_parser.add_argument('--failure', action='store_true', help='This was a failure')
+    reflect_parser.add_argument('--success', action='store_true', help='This was a success')
+    reflect_parser.add_argument('--context', required=True, help='What was attempted')
+    reflect_parser.add_argument('--error', help='Error message if failure')
+    reflect_parser.add_argument('--exec-id', help='Execution ID to link this reflection to')
+    
+    # Prompt command
+    subparsers.add_parser('prompt', help='Show current evolved prompt')
+    
+    # Stats command
+    subparsers.add_parser('stats', help='Show learning statistics')
+    
+    # History command
+    subparsers.add_parser('history', help='Show execution history with prompt effectiveness')
+    
+    # Test command
+    test_parser = subparsers.add_parser('test', help='Run self-improvement tests')
+    test_parser.add_argument('--scenario', choices=['async-error', 'null-error', 'overzealous', 'all'], 
+                           default='all', help='Test scenario to run')
+    
+    # Code command - execute code changes with jj tracking
+    code_parser = subparsers.add_parser('code', help='Execute code change with automatic reversion on failure')
+    code_parser.add_argument('--task', required=True, help='Task description')
+    code_parser.add_argument('--test-cmd', required=True, help='Test command to verify changes')
+    code_parser.add_argument('--no-revert', action='store_true', help='Do not auto-revert on failure')
+    
+    # Analyze command - analyze patterns and generalize rules
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze execution history and generalize patterns')
+    analyze_parser.add_argument('--apply', action='store_true', help='Apply generalizations to prompt')
+    
+    # Evolution command - show prompt evolution history
+    subparsers.add_parser('evolution', help='Show prompt evolution history')
+    
+    # Learn command - teach Seldon user-specific terms
+    learn_parser = subparsers.add_parser('learn', help='Teach Seldon a user-specific term')
+    learn_parser.add_argument('--term', required=True, help='The term to learn')
+    learn_parser.add_argument('--means', required=True, help='What the term means')
+    learn_parser.add_argument('--example', action='append', help='Example usage (can be repeated)')
+    
+    # Detect command - analyze prompt for user-specific language
+    detect_parser = subparsers.add_parser('detect', help='Detect user-specific language in a prompt')
+    detect_parser.add_argument('--prompt', required=True, help='The prompt to analyze')
+    
+    # Context command - help new AI sessions understand Seldon
+    subparsers.add_parser('context', help='Show context recovery information for new AI sessions')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return
+        
+    seldon = Seldon()
+    
+    if args.command == 'init':
+        seldon.init()
+    elif args.command == 'execute':
+        exec_id = seldon.execute(args.task)
+        print(f"Use this ID when reflecting: {exec_id}")
+    elif args.command == 'reflect':
+        if args.failure == args.success:
+            print("Error: Specify either --failure or --success")
+            return
+        seldon.reflect(args.failure, args.context, args.error, args.exec_id)
+    elif args.command == 'prompt':
+        seldon.prompt()
+    elif args.command == 'stats':
+        seldon.stats()
+    elif args.command == 'history':
+        seldon.history()
+    elif args.command == 'test':
+        seldon.test(args.scenario)
+    elif args.command == 'code':
+        success, message = seldon.code_with_reversion(args.task, args.test_cmd, args.no_revert)
+        if not success:
+            sys.exit(1)
+    elif args.command == 'analyze':
+        seldon.analyze_patterns(args.apply)
+    elif args.command == 'evolution':
+        seldon.show_evolution()
+    elif args.command == 'learn':
+        seldon.learn_term(args.term, args.means, args.example)
+    elif args.command == 'detect':
+        result = seldon.detect_prompt_mutation(args.prompt)
+        
+        if result['known_terms']:
+            print("\n📚 Known user-specific terms:")
+            for term in result['known_terms']:
+                print(f"  - '{term['term']}': {term['definition']['definition']}")
+        
+        if result['mutations']:
+            print("\n🔄 Possible variations detected:")
+            for mutation in result['mutations']:
+                print(f"  - '{mutation['found']}' might mean '{mutation['might_mean']}' (confidence: {mutation['confidence']:.0%})")
+        
+        if not result['known_terms'] and not result['mutations']:
+            print("No user-specific language detected.")
+    elif args.command == 'context':
+        seldon.show_context_recovery()
+
+if __name__ == '__main__':
+    main()
